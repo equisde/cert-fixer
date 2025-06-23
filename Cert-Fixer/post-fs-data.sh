@@ -32,19 +32,41 @@ ls /data/misc/user/*/cacerts-added/* | grep -o -E '[0-9a-fA-F]{8}.[0-9]+$' | cut
 
 echo "[i] found $(cat /data/local/tmp/cert-fixer.certs-found | wc -l) certificates"
 
-# Android 14 support
-echo "[i] checking for cert location in APEX container"
-if [ -d /apex/com.android.conscrypt/cacerts ]; then
-    # Clone directory into tmpfs
-    echo "[i] cert location exists in APEX"
-    echo "[i] copying cert to APEX container"
-    echo "[i] clone directory into tmpfs"
-    rm -f /data/local/tmp/adg-ca-copy
-    mkdir -p /data/local/tmp/adg-ca-copy
-    mount -t tmpfs tmpfs /data/local/tmp/adg-ca-copy
-    cp -f /apex/com.android.conscrypt/cacerts/* /data/local/tmp/adg-ca-copy/
+# Detect Android version by checking for APEX certificate directories
+IS_A15_PLUS=false
+IS_A14=false
+# Android 15 and newer have a second cacerts location in the com.android.build APEX
+if [ -d /apex/com.android.build/cacerts ]; then
+    echo "[i] Android 15+ detected"
+    IS_A15_PLUS=true
+# Android 14 has cacerts in the com.android.conscrypt APEX
+elif [ -d /apex/com.android.conscrypt/cacerts ]; then
+    echo "[i] Android 14 detected"
+    IS_A14=true
 else
-    echo "[i] APEX container not found, this must be Android < 14"
+    echo "[i] Android < 14 detected"
+fi
+
+# Clone original CA certs into tmpfs based on detected version
+if [ "$IS_A15_PLUS" = true ]; then
+    echo "[i] Cloning Conscrypt CA certs to tmpfs"
+    rm -rf /data/local/tmp/conscrypt-ca-copy
+    mkdir -p /data/local/tmp/conscrypt-ca-copy
+    mount -t tmpfs tmpfs /data/local/tmp/conscrypt-ca-copy
+    cp -f /apex/com.android.conscrypt/cacerts/* /data/local/tmp/conscrypt-ca-copy/
+
+    echo "[i] Cloning Build CA certs to tmpfs"
+    rm -rf /data/local/tmp/build-ca-copy
+    mkdir -p /data/local/tmp/build-ca-copy
+    mount -t tmpfs tmpfs /data/local/tmp/build-ca-copy
+    cp -f /apex/com.android.build/cacerts/* /data/local/tmp/build-ca-copy/
+
+elif [ "$IS_A14" = true ]; then
+    echo "[i] Cloning Conscrypt CA certs to tmpfs"
+    rm -rf /data/local/tmp/conscrypt-ca-copy
+    mkdir -p /data/local/tmp/conscrypt-ca-copy
+    mount -t tmpfs tmpfs /data/local/tmp/conscrypt-ca-copy
+    cp -f /apex/com.android.conscrypt/cacerts/* /data/local/tmp/conscrypt-ca-copy/
 fi
 
 echo "[i] entering loop for copying certificates to system store"
@@ -58,7 +80,7 @@ while read USER_CERT_HASH; do
 
     if ! [ -e "${USER_CERT_FILE}" ]; then
         echo "[e] error finding latest version of ${USER_CERT_HASH}"
-        exit 0
+        continue # Use continue instead of exit to allow other certs to be processed
     fi
 
     echo "[i] delete CAs removed by user or update"
@@ -70,36 +92,68 @@ while read USER_CERT_HASH; do
     chmod 644 ${MODDIR}/system/etc/security/cacerts/*
     set_context /system/etc/security/cacerts ${MODDIR}/system/etc/security/cacerts
 
-    # Android 14 support
-    echo "[i] checking for cert location in APEX container"
-    if [ -d /apex/com.android.conscrypt/cacerts ]; then
-        echo "[i] copy the cert and set the ownership and permissions"
-        cp -f ${USER_CERT_FILE} /data/local/tmp/adg-ca-copy/${USER_CERT_HASH}.0
-    else
-        echo "[i] APEX container not found, this must be Android < 14"
+    # Copy to temporary APEX directories if needed
+    if [ "$IS_A15_PLUS" = true ]; then
+        echo "[i] Copying cert to temporary APEX stores (A15+)"
+        cp -f ${USER_CERT_FILE} /data/local/tmp/conscrypt-ca-copy/${USER_CERT_HASH}.0
+        cp -f ${USER_CERT_FILE} /data/local/tmp/build-ca-copy/${USER_CERT_HASH}.0
+    elif [ "$IS_A14" = true ]; then
+        echo "[i] Copying cert to temporary APEX store (A14)"
+        cp -f ${USER_CERT_FILE} /data/local/tmp/conscrypt-ca-copy/${USER_CERT_HASH}.0
     fi
 
 done </data/local/tmp/cert-fixer.certs-found
 
-# Android 14 support
-echo "[i] checking for cert location in APEX container"
-if [ -d /apex/com.android.conscrypt/cacerts ]; then
-    chown -R 0:0 /data/local/tmp/adg-ca-copy
-    set_context /apex/com.android.conscrypt/cacerts /data/local/tmp/adg-ca-copy
+# Finalize mounts for APEX directories
+if [ "$IS_A15_PLUS" = true ]; then
+    echo "[i] Finalizing mounts for Android 15+"
 
-    # Mount directory inside APEX, and remove temporary one.
-    echo "[i] mount the directory inside APEX and remove the temp one"
-    mount --bind /data/local/tmp/adg-ca-copy /apex/com.android.conscrypt/cacerts
+    # Prepare and mount Conscrypt CA store
+    echo "[i] Preparing and mounting Conscrypt CA store"
+    chown -R 0:0 /data/local/tmp/conscrypt-ca-copy
+    set_context /apex/com.android.conscrypt/cacerts /data/local/tmp/conscrypt-ca-copy
+    mount --bind /data/local/tmp/conscrypt-ca-copy /apex/com.android.conscrypt/cacerts
+
+    # Prepare and mount Build CA store
+    echo "[i] Preparing and mounting Build CA store"
+    chown -R 0:0 /data/local/tmp/build-ca-copy
+    set_context /apex/com.android.build/cacerts /data/local/tmp/build-ca-copy
+    mount --bind /data/local/tmp/build-ca-copy /apex/com.android.build/cacerts
+
+    # Apply mounts to Zygote namespaces for both locations
+    echo "[i] Applying mounts to Zygote namespaces"
     for pid in 1 $(pgrep zygote) $(pgrep zygote64); do
         nsenter --mount=/proc/${pid}/ns/mnt -- \
-            /bin/mount --bind /data/local/tmp/adg-ca-copy /apex/com.android.conscrypt/cacerts
+            /bin/mount --bind /data/local/tmp/conscrypt-ca-copy /apex/com.android.conscrypt/cacerts
+        nsenter --mount=/proc/${pid}/ns/mnt -- \
+            /bin/mount --bind /data/local/tmp/build-ca-copy /apex/com.android.build/cacerts
     done
 
-    umount /data/local/tmp/adg-ca-copy
-    rmdir /data/local/tmp/adg-ca-copy
-else
-    echo "[i] APEX container not found, this must be Android < 14"
-fi
+    # Cleanup
+    umount /data/local/tmp/conscrypt-ca-copy
+    rmdir /data/local/tmp/conscrypt-ca-copy
+    umount /data/local/tmp/build-ca-copy
+    rmdir /data/local/tmp/build-ca-copy
 
+elif [ "$IS_A14" = true ]; then
+    echo "[i] Finalizing mount for Android 14"
+
+    # Prepare and mount Conscrypt CA store
+    echo "[i] Preparing and mounting Conscrypt CA store"
+    chown -R 0:0 /data/local/tmp/conscrypt-ca-copy
+    set_context /apex/com.android.conscrypt/cacerts /data/local/tmp/conscrypt-ca-copy
+    mount --bind /data/local/tmp/conscrypt-ca-copy /apex/com.android.conscrypt/cacerts
+
+    # Apply mounts to Zygote namespaces
+    echo "[i] Applying mounts to Zygote namespaces"
+    for pid in 1 $(pgrep zygote) $(pgrep zygote64); do
+        nsenter --mount=/proc/${pid}/ns/mnt -- \
+            /bin/mount --bind /data/local/tmp/conscrypt-ca-copy /apex/com.android.conscrypt/cacerts
+    done
+
+    # Cleanup
+    umount /data/local/tmp/conscrypt-ca-copy
+    rmdir /data/local/tmp/conscrypt-ca-copy
+fi
 
 echo "[i] Cert-Fixer execution completed"
