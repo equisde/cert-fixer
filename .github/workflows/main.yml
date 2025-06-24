@@ -1,6 +1,5 @@
 name: Build Cert-Fixer Zip Archive
 
-# Controls when the workflow will run
 on:
   # Triggers the workflow on push events for the "main" branch
   push:
@@ -11,35 +10,40 @@ on:
   workflow_dispatch:
 
 jobs:
-  # This workflow contains a single job called "build"
   build:
-    # The type of runner that the job will run on
     runs-on: ubuntu-latest
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # 1. Checks out your repository under $GITHUB_WORKSPACE, so your job can access it
+      # 1. Checks out your repository code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Create directory and build the zip file
-      #    This step runs inside the Cert-Fixer directory.
-      - name: Create Zip Archive
-        working-directory: ./Cert-Fixer
+      # 2. Build the final zip file with the correct structure
+      - name: Package Module into Zip
         run: |
-          echo "Creating required directory structure..."
+          # This script assumes your module files are inside a "Cert-Fixer" directory.
+          # If they are not, please adjust the path.
+          if [ ! -d "Cert-Fixer" ]; then
+            echo "::error::'Cert-Fixer' directory not found. Make sure your module files are inside a folder named 'Cert-Fixer' in your repository."
+            exit 1
+          fi
+          
+          # Navigate into the directory that contains the module files
+          cd Cert-Fixer
+          
+          # Ensure the required subdirectory exists (this is from your script)
           mkdir -p system/etc/security/cacerts/
           
-          echo "Zipping contents..."
-          # The command zips the contents of the current directory ('.')
-          # into a file named Cert-Fixer.zip in the parent directory.
-          zip -r ../Cert-Fixer.zip .
-      
-      # 3. Upload the generated zip file as a workflow artifact
-      - name: Upload Zip as Artifact
+          # Zip the contents of the current directory into a single file in the parent directory.
+          # This ensures that files like 'module.prop' are at the root of the zip.
+          echo "Zipping module files into ../Cert-Fixer-Module.zip"
+          zip -r ../Cert-Fixer-Module.zip *
+
+      # 3. Upload the single, correctly-structured zip file as a build artifact
+      - name: Upload Zip Artifact
         uses: actions/upload-artifact@v4
         with:
-          # The name of the artifact to be uploaded.
+          # The name of the downloadable artifact file
           name: Cert-Fixer-Module
-          # The path to the file to upload.
-          path: Cert-Fixer.zip
+          # The path to the file we just created
+          path: Cert-Fixer-Module.zip
